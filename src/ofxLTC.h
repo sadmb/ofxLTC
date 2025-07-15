@@ -7,6 +7,7 @@
 #ifndef ofxLTC_h
 #define ofxLTC_h
 
+
 #include "decoder.h"
 #include "encoder.h"
 #include "ofSoundStream.h"
@@ -14,6 +15,7 @@
 #include "ofUtils.h"
 #include "ofThread.h"
 #include "ofLog.h"
+
 
 namespace ofx {
     namespace LTC {
@@ -131,7 +133,6 @@ namespace ofx {
             void stop()
             {
                 is_playing = false;
-                // LTC は出し続けたいなら stopThread() しない
             }
             bool isPlaying()
             {
@@ -246,13 +247,10 @@ namespace ofx {
                         sample = ltcQueue.front();
                         ltcQueue.pop_front();
                     } else {
-                        // queueが空なら無音
                         sample = 0.0f;
                     }
 
-                    // LチャンネルだけにLTCを出す
                     buffer[i * buffer.getNumChannels() + 0] = sample;
-                    // Rチャンネルは無音
                     if (buffer.getNumChannels() > 1) {
                         buffer[i * buffer.getNumChannels() + 1] = 0.0f;
                     }
@@ -302,7 +300,6 @@ namespace ofx {
                 SMPTETimecode smpte;
                 memset(&smpte, 0, sizeof(smpte));
 
-                // timezoneは最大6文字
                 if(encoder->flags & LTC_USE_DATE) {
                     strncpy(smpte.timezone, currentTimecode.timezone.c_str(), 6);
                     smpte.years  = currentTimecode.year % 100;
@@ -315,7 +312,6 @@ namespace ofx {
                 smpte.frame  = currentTimecode.frame;
                 
                 ltc_encoder_set_timecode(encoder, &smpte);
-                // dfbit を反映させる
                 LTCFrame frame;
                 ltc_encoder_get_frame(encoder, &frame);
                 frame.dfbit = currentTimecode.raw_data.ltc.dfbit;
@@ -346,7 +342,6 @@ namespace ofx {
 
             std::deque<float> ltcQueue;
 
-            // 現在のタイムコード
             Timecode currentTimecode;
         };
     };
