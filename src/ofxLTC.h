@@ -123,17 +123,39 @@ namespace ofx {
                     waitForThread();
                 }
             }
+            
             void start()
             {
-                if(encoder)
-                {
+                if (!encoder) return;
+
+                if (!is_playing && pause_elapsed_time > 0) {
+                    // resume
+                    long paused_duration = ofGetElapsedTimeMillis() - pause_elapsed_time;
+                    playback_start_elapsed_time += paused_duration;
+                    pause_elapsed_time = 0;
+
                     is_playing = true;
+                    ofLogNotice() << "[LTC] Resumed playback.";
+                    return;
                 }
+
+                playback_start_elapsed_time = ofGetElapsedTimeMillis();
+
+                startTimecode = currentTimecode;
+                frames_already_advanced = 0;
+                is_playing = true;
+
+                ofLogNotice() << "[LTC] Starting playback.";
             }
+
             void stop()
             {
-                is_playing = false;
+                if (is_playing) {
+                    pause_elapsed_time = ofGetElapsedTimeMillis();
+                    is_playing = false;
+                }
             }
+
             bool isPlaying()
             {
                 return is_playing;
@@ -280,22 +302,40 @@ namespace ofx {
             void threadedFunction() override
             {
                 while (isThreadRunning()) {
-                    auto startTime = ofGetElapsedTimeMillis();
+                    double ms_per_frame = 1000.0 / fps;
+                    if (!is_playing) {
+                        update();
+                        sleep(1);
+                        continue;
+                    }
+
+                    long now_ms = ofGetElapsedTimeMillis();
+                    long elapsed_ms = now_ms - playback_start_elapsed_time;
+
+                    if (elapsed_ms < 0) elapsed_ms = 0;
+
+                    int frames_should_have_elapsed = int(elapsed_ms / ms_per_frame);
+                    int frames_to_advance = frames_should_have_elapsed - frames_already_advanced;
+
+                    if (frames_to_advance > 0 && frames_to_advance < 1000) {
+                        for (int i = 0; i < frames_to_advance; i++) {
+                            updateTimecode();
+                        }
+                        frames_already_advanced += frames_to_advance;
+                    } else if (frames_to_advance < 0) {
+                        ofLogWarning() << "[LTC] Negative frames_to_advance: " << frames_to_advance << ". Resetting to zero.";
+                        frames_to_advance = 0;
+                    } else if (frames_to_advance >= 1000) {
+                        ofLogWarning() << "[LTC] frames_to_advance too large: " << frames_to_advance << ". Resetting.";
+                        frames_already_advanced = frames_should_have_elapsed;
+                    }
 
                     update();
 
-                    if (is_playing) {
-                        updateTimecode();
-                    }
-
-                    auto elapsed = ofGetElapsedTimeMillis() - startTime;
-                    int waitTime = int(1000.0 / fps) - elapsed;
-                    if (waitTime > 0) {
-                        sleep(waitTime);
-                    }
+                    sleep(1);
                 }
             }
-            
+
             void update() {
                 SMPTETimecode smpte;
                 memset(&smpte, 0, sizeof(smpte));
@@ -330,7 +370,8 @@ namespace ofx {
                     float val = (float(samples[i]) - 128.f) / 127.f;
                     ltcQueue.push_back(val);
                 }
-                mutex.unlock();            }
+                mutex.unlock();
+            }
             
             ofSoundStream soundStream;
             LTCEncoder* encoder = nullptr;
@@ -339,10 +380,14 @@ namespace ofx {
             int samplesPerFrame = 0;
             size_t channel_offset = 0;
             bool is_playing = false;
-
+            
+            long frames_already_advanced = 0;
+            long playback_start_elapsed_time = 0;
+            long pause_elapsed_time = 0;
+            
             std::deque<float> ltcQueue;
 
-            Timecode currentTimecode;
+            Timecode currentTimecode, startTimecode;
         };
     };
 };
