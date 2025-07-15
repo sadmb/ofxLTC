@@ -12,6 +12,8 @@
 #include "ofSoundStream.h"
 #include "ofSoundBuffer.h"
 #include "ofUtils.h"
+#include "ofThread.h"
+#include "ofLog.h"
 
 namespace ofx {
     namespace LTC {
@@ -174,7 +176,7 @@ namespace ofx {
                 currentTimecode = tc;
             }
 
-            void setTimecode(int hour_, int min_, int sec_, int frame_, int year_ = 0, int month_ = 0, int day_ = 0, string timezone_ = "+0900", bool drop_frame_ = false, bool reverse = false) {
+            void setTimecode(int hour_, int min_, int sec_, int frame_, int year_ = 0, int month_ = 0, int day_ = 0, std::string timezone_ = "+0900", bool drop_frame_ = false, bool reverse = false) {
                 if(year_ <= 0)
                 {
                     year_ = ofGetYear();
