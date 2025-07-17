@@ -187,8 +187,6 @@ namespace ofx {
                     ofLogError() << "Failed to create LTC encoder";
                 }
 
-                ltcQueue.clear();
-
                 soundStream.setup(settings_);
                 if (!isThreadRunning()) {
                     startThread();
@@ -224,7 +222,7 @@ namespace ofx {
                 currentTimecode.reverse = reverse;
             }
             
-            Timecode getTimecode()
+            Timecode getTimecode() const
             {
                 return currentTimecode;
             }
@@ -261,25 +259,59 @@ namespace ofx {
             }
             
             void audioOut(ofSoundBuffer &buffer) {
-                mutex.lock();
-                for (size_t i = 0; i < buffer.getNumFrames(); i++) {
-                    float sample = 0.0f;
+                static int samples_left_in_frame = 0;
 
-                    if (!ltcQueue.empty()) {
-                        sample = ltcQueue.front();
-                        ltcQueue.pop_front();
-                    } else {
-                        sample = 0.0f;
+                const int samples_per_frame = encoder->sample_rate / fps;
+                const int num_channels = buffer.getNumChannels();
+
+                for (size_t i = 0; i < buffer.getNumFrames(); ++i) {
+                    if (samples_left_in_frame <= 0) {
+                        // 次のフレームへ進める
+                        generateNextFrame(); // 1フレーム分のLTCエンコードを準備
+
+                        samples_left_in_frame = samples_per_frame;
                     }
 
-                    buffer[i * buffer.getNumChannels() + 0] = sample;
-                    if (buffer.getNumChannels() > 1) {
-                        buffer[i * buffer.getNumChannels() + 1] = 0.0f;
-                    }
+                    // エンコード済みのLTCサンプルを取得
+                    int offset = samples_per_frame - samples_left_in_frame;
+                    ltcsnd_sample_t sample = frameBuffer[offset];
+                    float val = (float(sample) - 128.f) / 127.f;
+
+                    buffer[i * num_channels + 0] = val;
+                    if (num_channels > 1) buffer[i * num_channels + 1] = 0.0f;
+
+                    samples_left_in_frame--;
                 }
-                mutex.unlock();
             }
             
+            void generateNextFrame() {
+                SMPTETimecode smpte;
+                memset(&smpte, 0, sizeof(smpte));
+                smpte.hours = currentTimecode.hour;
+                smpte.mins = currentTimecode.min;
+                smpte.secs = currentTimecode.sec;
+                smpte.frame = currentTimecode.frame;
+
+                if (encoder->flags & LTC_USE_DATE) {
+                    strncpy(smpte.timezone, currentTimecode.timezone.c_str(), 6);
+                    smpte.years = currentTimecode.year % 100;
+                    smpte.months = currentTimecode.month;
+                    smpte.days = currentTimecode.day;
+                }
+
+                ltc_encoder_set_timecode(encoder, &smpte);
+                LTCFrame frame;
+                ltc_encoder_get_frame(encoder, &frame);
+                frame.dfbit = currentTimecode.raw_data.ltc.dfbit;
+                ltc_encoder_set_frame(encoder, &frame);
+
+                ltc_encoder_encode_frame(encoder);
+
+                int numSamples = 0;
+                ltcsnd_sample_t *samples = ltc_encoder_get_bufptr(encoder, &numSamples, 1);
+                frameBuffer.assign(samples, samples + numSamples);
+            }
+
             bool isLeapYear(int year) {
                 return ((year % 4 == 0) && (year % 100 != 0)) || (year % 400 == 0);
             }
@@ -299,79 +331,39 @@ namespace ofx {
                 }
             }
         protected:
-            void threadedFunction() override
-            {
+            void threadedFunction() override {
                 while (isThreadRunning()) {
-                    double ms_per_frame = 1000.0 / fps;
+                    const double ms_per_frame = 1000.0 / fps;
+                    const double sleep_buffer_ms = 1.0; // 微調整用バッファ（高負荷時の誤差吸収）
+                    const int samples_per_frame = int(encoder->sample_rate / fps); // 例: 44100 / 30 = 1470
+
+                    uint64_t now = ofGetElapsedTimeMillis();
+
                     if (!is_playing) {
-                        update();
                         sleep(1);
                         continue;
                     }
 
-                    long now_ms = ofGetElapsedTimeMillis();
-                    long elapsed_ms = now_ms - playback_start_elapsed_time;
-
+                    // 経過時間からフレーム数算出
+                    long elapsed_ms = now - playback_start_elapsed_time;
                     if (elapsed_ms < 0) elapsed_ms = 0;
 
                     int frames_should_have_elapsed = int(elapsed_ms / ms_per_frame);
                     int frames_to_advance = frames_should_have_elapsed - frames_already_advanced;
 
-                    if (frames_to_advance > 0 && frames_to_advance < 1000) {
-                        for (int i = 0; i < frames_to_advance; i++) {
+                    if (frames_to_advance > 0) {
+                        for (int i = 0; i < frames_to_advance; ++i) {
                             updateTimecode();
                         }
                         frames_already_advanced += frames_to_advance;
-                    } else if (frames_to_advance < 0) {
-                        ofLogWarning() << "[LTC] Negative frames_to_advance: " << frames_to_advance << ". Resetting to zero.";
-                        frames_to_advance = 0;
-                    } else if (frames_to_advance >= 1000) {
-                        ofLogWarning() << "[LTC] frames_to_advance too large: " << frames_to_advance << ". Resetting.";
-                        frames_already_advanced = frames_should_have_elapsed;
                     }
 
-                    update();
+                    // LTCバッファが多すぎるなら削る（5フレーム以上溜まっていたら削る）
 
-                    sleep(1);
+                    sleep((int)(ms_per_frame - sleep_buffer_ms)); // 約1フレームごとにupdate
                 }
             }
 
-            void update() {
-                SMPTETimecode smpte;
-                memset(&smpte, 0, sizeof(smpte));
-
-                if(encoder->flags & LTC_USE_DATE) {
-                    strncpy(smpte.timezone, currentTimecode.timezone.c_str(), 6);
-                    smpte.years  = currentTimecode.year % 100;
-                    smpte.months = currentTimecode.month;
-                    smpte.days   = currentTimecode.day;
-                }
-                smpte.hours  = currentTimecode.hour;
-                smpte.mins   = currentTimecode.min;
-                smpte.secs   = currentTimecode.sec;
-                smpte.frame  = currentTimecode.frame;
-                
-                ltc_encoder_set_timecode(encoder, &smpte);
-                LTCFrame frame;
-                ltc_encoder_get_frame(encoder, &frame);
-                frame.dfbit = currentTimecode.raw_data.ltc.dfbit;
-                ltc_encoder_set_frame(encoder, &frame);
-
-                ltc_encoder_encode_frame(encoder);
-
-                size_t numSamples = 0;
-                ltcsnd_sample_t *samples = ltc_encoder_get_bufptr(encoder, (int*)&numSamples, 1);
-                if (!samples || numSamples == 0) {
-                    return;
-                }
-
-                mutex.lock();
-                for (size_t i = 0; i < numSamples; i++) {
-                    float val = (float(samples[i]) - 128.f) / 127.f;
-                    ltcQueue.push_back(val);
-                }
-                mutex.unlock();
-            }
             
             ofSoundStream soundStream;
             LTCEncoder* encoder = nullptr;
@@ -385,8 +377,7 @@ namespace ofx {
             long playback_start_elapsed_time = 0;
             long pause_elapsed_time = 0;
             
-            std::deque<float> ltcQueue;
-
+            std::vector<ltcsnd_sample_t> frameBuffer;
             Timecode currentTimecode, startTimecode;
         };
     };
